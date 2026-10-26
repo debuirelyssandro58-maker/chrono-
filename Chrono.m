@@ -6,6 +6,8 @@
 #import <PhotosUI/PhotosUI.h>
 #import <QuartzCore/QuartzCore.h>
 
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+
 #define kScale @"chrono_scale"
 #define kColor @"chrono_color"
 #define kText  @"chrono_text"
@@ -340,4 +342,3 @@ static void CRInit(void) {
         [[CRChrono shared] installWhenReady];
     });
 }
-
