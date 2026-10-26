@@ -1,0 +1,20 @@
+name: Build dylib
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          clang -arch arm64 -isysroot "$SDK" \
+            -miphoneos-version-min=13.0 \
+            -dynamiclib -fobjc-arc \
+            -framework Foundation -framework UIKit -framework QuartzCore \
+            -o Chrono.dylib Chrono.m
+          codesign -f -s - Chrono.dylib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Chrono
+          path: Chrono.dylib
