@@ -6,7 +6,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Outils
-        run: sudo apt-get update && sudo apt-get install -y clang lld ldid
+        run: sudo apt-get update && sudo apt-get install -y clang lld
       - name: SDK iOS
         run: git clone --depth 1 https://github.com/theos/sdks.git
       - name: Compiler
@@ -17,7 +17,6 @@ jobs:
             -fobjc-arc -dynamiclib -fuse-ld=lld \
             -framework Foundation -framework UIKit -framework QuartzCore \
             -o Chrono.dylib Chrono.m
-          ldid -S Chrono.dylib || true
       - uses: actions/upload-artifact@v4
         with:
           name: Chrono
