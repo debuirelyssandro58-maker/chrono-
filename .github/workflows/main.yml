@@ -6,17 +6,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Outils
-        run: sudo apt-get update && sudo apt-get install -y clang lld
+        run: sudo apt-get update && sudo apt-get install -y clang lld git
       - name: SDK iOS
-        run: git clone --depth 1 https://github.com/theos/sdks.git
+        run: git clone --depth 1 https://github.com/theos/sdks.git sdks
       - name: Compiler
         run: |
           SDK=$(realpath $(ls -d sdks/iPhoneOS*.sdk | sort -V | tail -1))
-         -framework Foundation -framework UIKit -framework QuartzCore -framework PhotosUI \
+          echo "SDK utilisé : $SDK"
+          clang -target arm64-apple-ios14.0 -isysroot "$SDK" \
             -fobjc-arc -dynamiclib -fuse-ld=lld \
-             -framework Foundation -framework UIKit -framework QuartzCore -framework CoreGraphics \
-            -framework PhotoUI-o Chrono.dylib Chrono.m
+            -framework Foundation -framework UIKit \
+            -framework QuartzCore -framework PhotosUI \
+            -o Chrono.dylib Chrono.m
       - uses: actions/upload-artifact@v4
         with:
           name: Chrono
           path: Chrono.dylib
+
