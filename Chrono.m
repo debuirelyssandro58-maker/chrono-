@@ -25,6 +25,8 @@
 #define kBgC     @"chrono3_color_bg"
 #define kTextC   @"chrono3_color_text"
 #define kText    @"chrono_text"
+#define kWidth   @"chrono3_width"
+#define k4K      @"chrono3_4k"
 
 typedef NS_ENUM(NSInteger, CRState) { CRStateIdle, CRStateRunning, CRStatePaused };
 
@@ -71,14 +73,19 @@ static void CRSaveColor(NSString *key, UIColor *c) {
 + (instancetype)shared;
 - (void)installWhenReady;
 - (void)layoutChanged;
+- (BOOL)capturesPoint:(CGPoint)p;
 @end
 
 // Fenêtre par-dessus le jeu : laisse passer les touches là où il n'y a rien.
 @interface CROverlayWindow : UIWindow
+@property (nonatomic) BOOL allowKey;
 @end
 
 @implementation CROverlayWindow
-- (BOOL)canBecomeKeyWindow { return YES; }
+- (BOOL)canBecomeKeyWindow { return self.allowKey; }
+- (BOOL)pointInside:(CGPoint)p withEvent:(UIEvent *)e {
+    return [[CRChrono shared] capturesPoint:p];
+}
 - (UIView *)hitTest:(CGPoint)p withEvent:(UIEvent *)e {
     UIView *v = [super hitTest:p withEvent:e];
     if (v == nil || v == self || v == self.rootViewController.view || v.tag == 7001) return nil;
@@ -137,6 +144,10 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     UIColor *_textColor;
     NSString *_text;
     BOOL _editing;
+    CGFloat _width;
+    BOOL _fourK;
+    NSTimer *_resTimer;
+    NSMapTable *_origScale;
 }
 
 + (instancetype)shared {
@@ -169,6 +180,7 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     [self buildPanel];
     [self applyStyle];
     [self applySaturation];
+    [self apply4K];
 }
 
 - (void)loadPrefs {
@@ -179,6 +191,9 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     _saturation = MAX(1, MIN(100, sat));
     _bgOpacity = [d objectForKey:kOpacity] ? [d floatForKey:kOpacity] : 0.55;
     _text = [d stringForKey:kText] ?: @"";
+    float wd = [d floatForKey:kWidth];
+    _width = (wd >= 160 && wd <= 420) ? wd : 280;
+    _fourK = [d boolForKey:k4K];
     _runColor   = CRLoadColor(kRunC,   [UIColor colorWithRed:0.24 green:0.86 blue:0.52 alpha:1]);
     _pauseColor = CRLoadColor(kPauseC, [UIColor colorWithRed:1.00 green:0.69 blue:0.13 alpha:1]);
     _bgColor    = CRLoadColor(kBgC,    UIColor.blackColor);
@@ -190,6 +205,8 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     [d setFloat:_scale forKey:kScale];
     [d setFloat:_saturation forKey:kSat];
     [d setFloat:_bgOpacity forKey:kOpacity];
+    [d setFloat:_width forKey:kWidth];
+    [d setBool:_fourK forKey:k4K];
     [d setObject:_text ?: @"" forKey:kText];
     CRSaveColor(kRunC, _runColor);
     CRSaveColor(kPauseC, _pauseColor);
@@ -233,13 +250,13 @@ static void CRSaveColor(NSString *key, UIColor *c) {
 - (void)buildBox {
     UIView *root = _rootVC.view;
 
-    _box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 200, 100)];
+    _box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, _width, 100)];
     _box.tag = 7001;
     _box.center = CGPointMake(_overlay.bounds.size.width / 2, 80);
     [root addSubview:_box];
 
     // Texte : au-dessus du chrono, en dehors
-    _textLabel = [self labelText:_text frame:CGRectMake(0, 0, 200, 22) size:14];
+    _textLabel = [self labelText:_text frame:CGRectMake(0, 0, _width, 22) size:14];
     _textLabel.textAlignment = NSTextAlignmentCenter;
     _textLabel.adjustsFontSizeToFitWidth = YES;
     _textLabel.minimumScaleFactor = 0.6;
@@ -250,8 +267,10 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     [_box addSubview:_textLabel];
 
     // Chrono
-    _card = [[UIView alloc] initWithFrame:CGRectMake(0, 24, 200, 76)];
-    _card.layer.cornerRadius = 10;
+    _card = [[UIView alloc] initWithFrame:CGRectMake(0, 24, _width, 76)];
+    _card.layer.cornerRadius = 3;
+    _card.layer.borderWidth = 1;
+    _card.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.18].CGColor;
     _card.clipsToBounds = YES;
     [_box addSubview:_card];
 
@@ -264,7 +283,7 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     _tint = [[UIView alloc] initWithFrame:_card.bounds];
     [_card addSubview:_tint];
 
-    _timeLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 0, 180, 76)];
+    _timeLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 0, _width - 20, 76)];
     _timeLabel.textAlignment = NSTextAlignmentRight;
     _timeLabel.adjustsFontSizeToFitWidth = YES;
     _timeLabel.minimumScaleFactor = 0.5;
@@ -300,6 +319,16 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     c.y = MAX(20, MIN(b.height - 20, c.y));
     _box.center = c;
     if (_panel && !_panel.hidden) [self layoutPanel];
+}
+
+// Les touches ne sont captées que sur le chrono, les réglages ou un sélecteur ouvert.
+// Partout ailleurs elles passent directement au jeu.
+- (BOOL)capturesPoint:(CGPoint)p {
+    if (!_card || !_overlay) return NO;
+    if (_rootVC.presentedViewController) return YES;
+    if (!_panel.hidden && CGRectContainsPoint(_panel.frame, p)) return YES;
+    CGPoint pc = [_card convertPoint:p fromView:_overlay];
+    return [_card pointInside:pc withEvent:nil];
 }
 
 #pragma mark Logique du chrono
@@ -364,6 +393,72 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     [self showTime:[self elapsed]];
 }
 
+- (void)applyWidth {
+    _box.bounds = CGRectMake(0, 0, _width, 100);
+    _textLabel.frame = CGRectMake(0, 0, _width, 22);
+    _card.frame = CGRectMake(0, 24, _width, 76);
+    _bg.frame = _card.bounds;
+    _tint.frame = _card.bounds;
+    _timeLabel.frame = CGRectMake(10, 0, _width - 20, 76);
+}
+
+#pragma mark Mode 4K
+
+// Suréchantillonne le rendu du jeu (vues Metal/GL) vers ~3840 px sur le grand côté.
+- (void)collectRenderViews:(UIView *)v into:(NSMutableArray *)out {
+    Class metal = NSClassFromString(@"CAMetalLayer");
+    Class eagl = NSClassFromString(@"CAEAGLLayer");
+    if ((metal && [v.layer isKindOfClass:metal]) || (eagl && [v.layer isKindOfClass:eagl])) {
+        [out addObject:v];
+    }
+    for (UIView *sub in v.subviews) [self collectRenderViews:sub into:out];
+}
+
+- (void)setScale:(CGFloat)sc forRenderView:(UIView *)v {
+    v.contentScaleFactor = sc;
+    v.layer.contentsScale = sc;
+    if ([v.layer respondsToSelector:NSSelectorFromString(@"setDrawableSize:")]) {
+        CGSize sz = CGSizeMake(v.bounds.size.width * sc, v.bounds.size.height * sc);
+        [v.layer setValue:[NSValue valueWithCGSize:sz] forKey:@"drawableSize"];
+    }
+    [v setNeedsLayout];
+}
+
+- (void)applyResolution {
+    if (!_gameWindow) return;
+    CGSize b = _gameWindow.bounds.size;
+    CGFloat longSide = MAX(b.width, b.height);
+    if (longSide <= 0) return;
+    CGFloat target = MIN(5.0, 3840.0 / longSide);
+    NSMutableArray *views = [NSMutableArray array];
+    [self collectRenderViews:_gameWindow into:views];
+    for (UIView *v in views) {
+        if (![_origScale objectForKey:v]) [_origScale setObject:@(v.contentScaleFactor) forKey:v];
+        if (fabs(v.contentScaleFactor - target) > 0.01) [self setScale:target forRenderView:v];
+    }
+}
+
+- (void)apply4K {
+    [_resTimer invalidate];
+    _resTimer = nil;
+    if (!_origScale) _origScale = [NSMapTable weakToStrongObjectsMapTable];
+    if (!_gameWindow) return;
+    if (_fourK) {
+        [self applyResolution];
+        // Le jeu peut remettre sa résolution : on la réapplique régulièrement
+        _resTimer = [NSTimer scheduledTimerWithTimeInterval:2.0 target:self selector:@selector(applyResolution) userInfo:nil repeats:YES];
+        return;
+    }
+    // Retour à la résolution normale
+    NSMutableArray *views = [NSMutableArray array];
+    [self collectRenderViews:_gameWindow into:views];
+    for (UIView *v in views) {
+        NSNumber *o = [_origScale objectForKey:v];
+        if (o) [self setScale:o.doubleValue forRenderView:v];
+        [_origScale removeObjectForKey:v];
+    }
+}
+
 // Saturation de l'écran du jeu : 1 à 100 (50 = normal)
 - (void)applySaturation {
     if (!_gameWindow) return;
@@ -406,6 +501,12 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     [_scroll addSubview:[self sliderMin:0.4 max:1.4 value:_scale frame:CGRectMake(16, y, W, 30) action:@selector(sizeChanged:)]];
     y += 42;
 
+    // Longueur
+    [_scroll addSubview:[self labelText:@"Longueur" frame:CGRectMake(16, y, W, 20) size:14]];
+    y += 22;
+    [_scroll addSubview:[self sliderMin:160 max:420 value:_width frame:CGRectMake(16, y, W, 30) action:@selector(widthChanged:)]];
+    y += 42;
+
     // Saturation
     [_scroll addSubview:[self labelText:@"Saturation du jeu (50 = normal)" frame:CGRectMake(16, y, W - 50, 20) size:14]];
     _satValue = [self labelText:[NSString stringWithFormat:@"%d", (int)_saturation] frame:CGRectMake(16 + W - 46, y, 46, 20) size:14];
@@ -414,6 +515,14 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     y += 22;
     [_scroll addSubview:[self sliderMin:1 max:100 value:_saturation frame:CGRectMake(16, y, W, 30) action:@selector(satChanged:)]];
     y += 42;
+
+    // Mode 4K
+    [_scroll addSubview:[self labelText:@"Mode 4K (résolution du jeu)" frame:CGRectMake(16, y + 6, W - 60, 20) size:14]];
+    UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(16 + W - 51, y, 51, 31)];
+    sw.on = _fourK;
+    [sw addTarget:self action:@selector(fourKChanged:) forControlEvents:UIControlEventValueChanged];
+    [_scroll addSubview:sw];
+    y += 46;
 
     // Couleurs
     y = [self colorRow:@"Chrono en marche" tag:1 color:_runColor y:y width:W];
@@ -503,6 +612,18 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     [self savePrefs];
 }
 
+- (void)widthChanged:(UISlider *)s {
+    _width = roundf(s.value);
+    [self applyWidth];
+    [self savePrefs];
+}
+
+- (void)fourKChanged:(UISwitch *)s {
+    _fourK = s.on;
+    [self apply4K];
+    [self savePrefs];
+}
+
 - (void)opChanged:(UISlider *)s {
     _bgOpacity = roundf(s.value) / 100.0;
     _opValue.text = [NSString stringWithFormat:@"%d%%", (int)roundf(s.value)];
@@ -538,6 +659,7 @@ static void CRSaveColor(NSString *key, UIColor *c) {
 
 - (void)textFieldDidBeginEditing:(UITextField *)f {
     _editing = YES;
+    _overlay.allowKey = YES;
     [_overlay makeKeyWindow];
     [self layoutPanel];
     [_scroll setContentOffset:CGPointMake(0, MAX(0, f.frame.origin.y - 36)) animated:NO];
@@ -546,6 +668,7 @@ static void CRSaveColor(NSString *key, UIColor *c) {
 - (void)textFieldDidEndEditing:(UITextField *)f {
     _editing = NO;
     [self layoutPanel];
+    _overlay.allowKey = NO;
     [_gameWindow makeKeyWindow];
 }
 
