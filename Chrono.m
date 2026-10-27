@@ -27,6 +27,7 @@
 #define kText    @"chrono_text"
 #define kWidth   @"chrono3_width"
 #define k4K      @"chrono3_4k"
+#define kHideSB  @"chrono3_hide_statusbar"
 
 typedef NS_ENUM(NSInteger, CRState) { CRStateIdle, CRStateRunning, CRStatePaused };
 
@@ -74,6 +75,8 @@ static void CRSaveColor(NSString *key, UIColor *c) {
 - (void)installWhenReady;
 - (void)layoutChanged;
 - (BOOL)capturesPoint:(CGPoint)p;
+@property (nonatomic, readonly) UIViewController *gameRootVC;
+@property (nonatomic) BOOL hideStatusBar;
 @end
 
 // Fenêtre par-dessus le jeu : laisse passer les touches là où il n'y a rien.
@@ -104,6 +107,26 @@ static void CRSaveColor(NSString *key, UIColor *c) {
 }
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskAll; }
 - (BOOL)shouldAutorotate { return YES; }
+
+// Cette fenêtre ne doit jamais changer l'apparence du jeu (barre d'état, barre home...)
+- (BOOL)prefersStatusBarHidden {
+    if ([CRChrono shared].hideStatusBar) return YES;
+    UIViewController *g = [CRChrono shared].gameRootVC;
+    return g ? g.prefersStatusBarHidden : NO;
+}
+- (UIStatusBarStyle)preferredStatusBarStyle {
+    UIViewController *g = [CRChrono shared].gameRootVC;
+    return g ? g.preferredStatusBarStyle : UIStatusBarStyleDefault;
+}
+- (UIStatusBarAnimation)preferredStatusBarUpdateAnimation { return UIStatusBarAnimationNone; }
+- (BOOL)prefersHomeIndicatorAutoHidden {
+    UIViewController *g = [CRChrono shared].gameRootVC;
+    return g ? g.prefersHomeIndicatorAutoHidden : NO;
+}
+- (UIRectEdge)preferredScreenEdgesDeferringSystemGestures {
+    UIViewController *g = [CRChrono shared].gameRootVC;
+    return g ? g.preferredScreenEdgesDeferringSystemGestures : UIRectEdgeNone;
+}
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     [[CRChrono shared] layoutChanged];
@@ -148,12 +171,20 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     BOOL _fourK;
     NSTimer *_resTimer;
     NSMapTable *_origScale;
+    BOOL _hideStatusBar;
 }
 
 + (instancetype)shared {
     static CRChrono *s; static dispatch_once_t once;
     dispatch_once(&once, ^{ s = [CRChrono new]; });
     return s;
+}
+
+- (UIViewController *)gameRootVC { return _gameWindow.rootViewController; }
+- (BOOL)hideStatusBar { return _hideStatusBar; }
+- (void)setHideStatusBar:(BOOL)h {
+    _hideStatusBar = h;
+    [_rootVC setNeedsStatusBarAppearanceUpdate];
 }
 
 #pragma mark Install
@@ -181,6 +212,7 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     [self applyStyle];
     [self applySaturation];
     [self apply4K];
+    [_rootVC setNeedsStatusBarAppearanceUpdate];
 }
 
 - (void)loadPrefs {
@@ -194,6 +226,7 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     float wd = [d floatForKey:kWidth];
     _width = (wd >= 160 && wd <= 420) ? wd : 280;
     _fourK = [d boolForKey:k4K];
+    _hideStatusBar = [d objectForKey:kHideSB] ? [d boolForKey:kHideSB] : YES;
     _runColor   = CRLoadColor(kRunC,   [UIColor colorWithRed:0.24 green:0.86 blue:0.52 alpha:1]);
     _pauseColor = CRLoadColor(kPauseC, [UIColor colorWithRed:1.00 green:0.69 blue:0.13 alpha:1]);
     _bgColor    = CRLoadColor(kBgC,    UIColor.blackColor);
@@ -207,6 +240,7 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     [d setFloat:_bgOpacity forKey:kOpacity];
     [d setFloat:_width forKey:kWidth];
     [d setBool:_fourK forKey:k4K];
+    [d setBool:_hideStatusBar forKey:kHideSB];
     [d setObject:_text ?: @"" forKey:kText];
     CRSaveColor(kRunC, _runColor);
     CRSaveColor(kPauseC, _pauseColor);
@@ -524,6 +558,14 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     [_scroll addSubview:sw];
     y += 46;
 
+    // Barre d'état iPhone
+    [_scroll addSubview:[self labelText:@"Masquer la barre iPhone (heure)" frame:CGRectMake(16, y + 6, W - 60, 20) size:14]];
+    UISwitch *sb = [[UISwitch alloc] initWithFrame:CGRectMake(16 + W - 51, y, 51, 31)];
+    sb.on = _hideStatusBar;
+    [sb addTarget:self action:@selector(statusBarChanged:) forControlEvents:UIControlEventValueChanged];
+    [_scroll addSubview:sb];
+    y += 46;
+
     // Couleurs
     y = [self colorRow:@"Chrono en marche" tag:1 color:_runColor y:y width:W];
     y = [self colorRow:@"Chrono en pause" tag:2 color:_pauseColor y:y width:W];
@@ -609,6 +651,11 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     _saturation = roundf(s.value);
     _satValue.text = [NSString stringWithFormat:@"%d", (int)_saturation];
     [self applySaturation];
+    [self savePrefs];
+}
+
+- (void)statusBarChanged:(UISwitch *)s {
+    self.hideStatusBar = s.on;
     [self savePrefs];
 }
 
