@@ -1,6 +1,7 @@
-// Chrono.m — v3 (style LiveSplit)
+// Chrono.m — v4
 //
-// Utilisation :
+// Chrono en 3 cases (00h 15m 16s) + compteur FPS + résolution du jeu réglable.
+//
 //   1 clic sur le chrono  -> lance
 //   1 clic                -> pause
 //   1 clic en pause       -> reset
@@ -13,23 +14,53 @@
 #import <PhotosUI/PhotosUI.h>
 #import <QuartzCore/QuartzCore.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <objc/runtime.h>
 
 #pragma clang diagnostic ignored "-Wunguarded-availability-new"
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
 
-#define kScale   @"chrono3_scale"
-#define kSat     @"chrono3_saturation"
-#define kOpacity @"chrono3_bg_opacity"
-#define kRunC    @"chrono3_color_run"
-#define kPauseC  @"chrono3_color_pause"
-#define kBgC     @"chrono3_color_bg"
-#define kTextC   @"chrono3_color_text"
+#define kScale   @"chrono4_scale"
+#define kWidth   @"chrono4_width"
+#define kSat     @"chrono4_saturation"
+#define kOpacity @"chrono4_bg_opacity"
+#define kRes     @"chrono4_resolution"
+#define kFPS     @"chrono4_show_fps"
+#define kHideSB  @"chrono4_hide_statusbar"
+#define kRunC    @"chrono4_color_run"
+#define kPauseC  @"chrono4_color_pause"
+#define kBgC     @"chrono4_color_bg"
+#define kTextC   @"chrono4_color_text"
 #define kText    @"chrono_text"
-#define kWidth   @"chrono3_width"
-#define k4K      @"chrono3_4k"
-#define kHideSB  @"chrono3_hide_statusbar"
+
+// Dimensions des cases
+#define kPillH   34.0
+#define kGap     6.0
+#define kTextH   22.0
+#define kFpsH    24.0
+#define kFpsW    84.0
+#define kBoxH    (kTextH + 2.0 + kPillH + 4.0 + kFpsH)
 
 typedef NS_ENUM(NSInteger, CRState) { CRStateIdle, CRStateRunning, CRStatePaused };
+
+#pragma mark - Compteur d'images (FPS)
+
+// Compte les images réellement présentées par le jeu (couche Metal).
+static int64_t gFrames = 0;
+static id (*orig_nextDrawable)(id, SEL) = NULL;
+
+static id hook_nextDrawable(id self, SEL _cmd) {
+    __atomic_fetch_add(&gFrames, 1, __ATOMIC_RELAXED);
+    return orig_nextDrawable(self, _cmd);
+}
+
+static void CRHookFrames(void) {
+    Class cls = NSClassFromString(@"CAMetalLayer");
+    if (!cls) return;
+    Method m = class_getInstanceMethod(cls, NSSelectorFromString(@"nextDrawable"));
+    if (!m || orig_nextDrawable) return;
+    orig_nextDrawable = (id (*)(id, SEL))method_getImplementation(m);
+    method_setImplementation(m, (IMP)hook_nextDrawable);
+}
 
 #pragma mark - Helpers
 
@@ -79,7 +110,7 @@ static void CRSaveColor(NSString *key, UIColor *c) {
 @property (nonatomic) BOOL hideStatusBar;
 @end
 
-// Fenêtre par-dessus le jeu : laisse passer les touches là où il n'y a rien.
+// Fenêtre par-dessus le jeu : les touches passent au jeu partout sauf sur le chrono.
 @interface CROverlayWindow : UIWindow
 @property (nonatomic) BOOL allowKey;
 @end
@@ -127,6 +158,7 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     UIViewController *g = [CRChrono shared].gameRootVC;
     return g ? g.preferredScreenEdgesDeferringSystemGestures : UIRectEdgeNone;
 }
+
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     [[CRChrono shared] layoutChanged];
@@ -140,12 +172,12 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     CROverlayWindow *_overlay;
     CRRootVC *_rootVC;
 
-    UIView *_box;          // chrono + texte
-    UILabel *_textLabel;   // texte, au-dessus et hors du chrono
-    UIView *_card;         // le chrono
-    UIImageView *_bg;
-    UIView *_tint;
-    UILabel *_timeLabel;
+    UIView *_box;              // texte + cases + FPS
+    UILabel *_textLabel;       // texte, au-dessus et hors du chrono
+    UIView *_row;              // la rangée des 3 cases
+    NSArray<UIView *> *_pills; // cases : subviews = [image, voile, label]
+    UIView *_fpsPill;          // case FPS : subviews = [voile, label]
+    UILabel *_fpsLabel;
 
     UIView *_panel;
     UIScrollView *_scroll;
@@ -158,20 +190,26 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     NSTimeInterval _accumulated;
     CRState _state;
 
+    NSTimer *_fpsTimer;
+    int64_t _lastFrames;
+    CFTimeInterval _lastFpsTime;
+
+    NSTimer *_resTimer;
+    NSMapTable *_origScale;
+
     CGFloat _scale;
+    CGFloat _width;
     CGFloat _saturation;
     CGFloat _bgOpacity;
+    NSInteger _resMode;        // 0 Bas, 1 Normal, 2 2K, 3 4K
+    BOOL _showFPS;
+    BOOL _hideStatusBar;
     UIColor *_runColor;
     UIColor *_pauseColor;
     UIColor *_bgColor;
     UIColor *_textColor;
     NSString *_text;
     BOOL _editing;
-    CGFloat _width;
-    BOOL _fourK;
-    NSTimer *_resTimer;
-    NSMapTable *_origScale;
-    BOOL _hideStatusBar;
 }
 
 + (instancetype)shared {
@@ -211,23 +249,26 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     [self buildPanel];
     [self applyStyle];
     [self applySaturation];
-    [self apply4K];
+    [self applyResolution];
+    [self updateFPS];
     [_rootVC setNeedsStatusBarAppearanceUpdate];
 }
 
 - (void)loadPrefs {
     NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
     float sc = [d floatForKey:kScale];
-    _scale = (sc >= 0.4 && sc <= 1.4) ? sc : 1.0;
+    _scale = (sc >= 0.4 && sc <= 1.6) ? sc : 1.0;
+    float wd = [d floatForKey:kWidth];
+    _width = (wd >= 120 && wd <= 420) ? wd : 192;
     float sat = [d objectForKey:kSat] ? [d floatForKey:kSat] : 50;
     _saturation = MAX(1, MIN(100, sat));
-    _bgOpacity = [d objectForKey:kOpacity] ? [d floatForKey:kOpacity] : 0.55;
-    _text = [d stringForKey:kText] ?: @"";
-    float wd = [d floatForKey:kWidth];
-    _width = (wd >= 160 && wd <= 420) ? wd : 280;
-    _fourK = [d boolForKey:k4K];
+    _bgOpacity = [d objectForKey:kOpacity] ? [d floatForKey:kOpacity] : 0.88;
+    NSInteger rm = [d objectForKey:kRes] ? [d integerForKey:kRes] : 1;
+    _resMode = MAX(0, MIN(3, rm));
+    _showFPS = [d objectForKey:kFPS] ? [d boolForKey:kFPS] : YES;
     _hideStatusBar = [d objectForKey:kHideSB] ? [d boolForKey:kHideSB] : YES;
-    _runColor   = CRLoadColor(kRunC,   [UIColor colorWithRed:0.24 green:0.86 blue:0.52 alpha:1]);
+    _text = [d stringForKey:kText] ?: @"";
+    _runColor   = CRLoadColor(kRunC,   UIColor.whiteColor);
     _pauseColor = CRLoadColor(kPauseC, [UIColor colorWithRed:1.00 green:0.69 blue:0.13 alpha:1]);
     _bgColor    = CRLoadColor(kBgC,    UIColor.blackColor);
     _textColor  = CRLoadColor(kTextC,  UIColor.whiteColor);
@@ -236,10 +277,11 @@ static void CRSaveColor(NSString *key, UIColor *c) {
 - (void)savePrefs {
     NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
     [d setFloat:_scale forKey:kScale];
+    [d setFloat:_width forKey:kWidth];
     [d setFloat:_saturation forKey:kSat];
     [d setFloat:_bgOpacity forKey:kOpacity];
-    [d setFloat:_width forKey:kWidth];
-    [d setBool:_fourK forKey:k4K];
+    [d setInteger:_resMode forKey:kRes];
+    [d setBool:_showFPS forKey:kFPS];
     [d setBool:_hideStatusBar forKey:kHideSB];
     [d setObject:_text ?: @"" forKey:kText];
     CRSaveColor(kRunC, _runColor);
@@ -279,18 +321,18 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     return s;
 }
 
-#pragma mark Le chrono
+#pragma mark Le chrono (3 cases)
 
 - (void)buildBox {
     UIView *root = _rootVC.view;
 
-    _box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, _width, 100)];
+    _box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, _width, kBoxH)];
     _box.tag = 7001;
     _box.center = CGPointMake(_overlay.bounds.size.width / 2, 80);
     [root addSubview:_box];
 
     // Texte : au-dessus du chrono, en dehors
-    _textLabel = [self labelText:_text frame:CGRectMake(0, 0, _width, 22) size:14];
+    _textLabel = [self labelText:_text frame:CGRectMake(0, 0, _width, kTextH) size:14];
     _textLabel.textAlignment = NSTextAlignmentCenter;
     _textLabel.adjustsFontSizeToFitWidth = YES;
     _textLabel.minimumScaleFactor = 0.6;
@@ -300,28 +342,55 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     _textLabel.layer.shadowOffset = CGSizeMake(0, 1);
     [_box addSubview:_textLabel];
 
-    // Chrono
-    _card = [[UIView alloc] initWithFrame:CGRectMake(0, 24, _width, 76)];
-    _card.layer.cornerRadius = 3;
-    _card.layer.borderWidth = 1;
-    _card.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.18].CGColor;
-    _card.clipsToBounds = YES;
-    [_box addSubview:_card];
+    // Rangée des 3 cases : 00h  15m  16s
+    _row = [[UIView alloc] initWithFrame:CGRectMake(0, kTextH + 2, _width, kPillH)];
+    [_box addSubview:_row];
 
-    _bg = [[UIImageView alloc] initWithFrame:_card.bounds];
-    _bg.contentMode = UIViewContentModeScaleAspectFill;
-    _bg.clipsToBounds = YES;
-    _bg.image = [UIImage imageWithContentsOfFile:CRImagePath()];
-    [_card addSubview:_bg];
+    UIImage *img = [UIImage imageWithContentsOfFile:CRImagePath()];
+    NSMutableArray *pills = [NSMutableArray array];
+    for (int i = 0; i < 3; i++) {
+        UIView *p = [UIView new];
+        p.layer.cornerRadius = 8;
+        p.clipsToBounds = YES;
 
-    _tint = [[UIView alloc] initWithFrame:_card.bounds];
-    [_card addSubview:_tint];
+        UIImageView *iv = [UIImageView new];
+        iv.contentMode = UIViewContentModeScaleAspectFill;
+        iv.clipsToBounds = YES;
+        iv.image = img;
 
-    _timeLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 0, _width - 20, 76)];
-    _timeLabel.textAlignment = NSTextAlignmentRight;
-    _timeLabel.adjustsFontSizeToFitWidth = YES;
-    _timeLabel.minimumScaleFactor = 0.5;
-    [_card addSubview:_timeLabel];
+        UIView *tint = [UIView new];
+
+        UILabel *l = [UILabel new];
+        l.textAlignment = NSTextAlignmentCenter;
+        l.adjustsFontSizeToFitWidth = YES;
+        l.minimumScaleFactor = 0.5;
+        l.font = [UIFont monospacedDigitSystemFontOfSize:20 weight:UIFontWeightSemibold];
+
+        [p addSubview:iv];
+        [p addSubview:tint];
+        [p addSubview:l];
+        [_row addSubview:p];
+        [pills addObject:p];
+    }
+    _pills = pills;
+
+    // Case FPS, sous le chrono
+    _fpsPill = [UIView new];
+    _fpsPill.layer.cornerRadius = 8;
+    _fpsPill.clipsToBounds = YES;
+    UIView *ft = [UIView new];
+    _fpsLabel = [UILabel new];
+    _fpsLabel.textAlignment = NSTextAlignmentCenter;
+    _fpsLabel.adjustsFontSizeToFitWidth = YES;
+    _fpsLabel.minimumScaleFactor = 0.6;
+    _fpsLabel.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightBold];
+    _fpsLabel.text = @"-- FPS";
+    _fpsLabel.textColor = UIColor.whiteColor;
+    [_fpsPill addSubview:ft];
+    [_fpsPill addSubview:_fpsLabel];
+    [_box addSubview:_fpsPill];
+
+    [self layoutPills];
 
     // Gestes : clic, appui long, glisser
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tapped)];
@@ -329,9 +398,31 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     lp.minimumPressDuration = 0.6;
     [tap requireGestureRecognizerToFail:lp];
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(pan:)];
-    [_card addGestureRecognizer:tap];
-    [_card addGestureRecognizer:lp];
-    [_card addGestureRecognizer:pan];
+    [_row addGestureRecognizer:tap];
+    [_row addGestureRecognizer:lp];
+    [_row addGestureRecognizer:pan];
+}
+
+// Place les 3 cases selon la longueur choisie
+- (void)layoutPills {
+    CGFloat bw = floor((_width - 2 * kGap) / 3.0);
+    _box.bounds = CGRectMake(0, 0, _width, kBoxH);
+    _textLabel.frame = CGRectMake(0, 0, _width, kTextH);
+    _row.frame = CGRectMake(0, kTextH + 2, _width, kPillH);
+    for (NSInteger i = 0; i < 3; i++) {
+        UIView *p = _pills[i];
+        p.frame = CGRectMake(i * (bw + kGap), 0, bw, kPillH);
+        p.subviews[0].frame = p.bounds;
+        p.subviews[1].frame = p.bounds;
+        p.subviews[2].frame = CGRectInset(p.bounds, 4, 0);
+    }
+    _fpsPill.frame = CGRectMake(0, kTextH + 2 + kPillH + 4, kFpsW, kFpsH);
+    _fpsPill.subviews[0].frame = _fpsPill.bounds;
+    _fpsLabel.frame = CGRectInset(_fpsPill.bounds, 4, 0);
+}
+
+- (void)setPillImage:(UIImage *)img {
+    for (UIView *p in _pills) ((UIImageView *)p.subviews[0]).image = img;
 }
 
 - (void)pan:(UIPanGestureRecognizer *)g {
@@ -358,11 +449,11 @@ static void CRSaveColor(NSString *key, UIColor *c) {
 // Les touches ne sont captées que sur le chrono, les réglages ou un sélecteur ouvert.
 // Partout ailleurs elles passent directement au jeu.
 - (BOOL)capturesPoint:(CGPoint)p {
-    if (!_card || !_overlay) return NO;
+    if (!_row || !_overlay) return NO;
     if (_rootVC.presentedViewController) return YES;
     if (!_panel.hidden && CGRectContainsPoint(_panel.frame, p)) return YES;
-    CGPoint pc = [_card convertPoint:p fromView:_overlay];
-    return [_card pointInside:pc withEvent:nil];
+    CGPoint pc = [_row convertPoint:p fromView:_overlay];
+    return [_row pointInside:pc withEvent:nil];
 }
 
 #pragma mark Logique du chrono
@@ -377,7 +468,7 @@ static void CRSaveColor(NSString *key, UIColor *c) {
         case CRStateIdle:
             _startTime = CACurrentMediaTime();
             _state = CRStateRunning;
-            _timer = [NSTimer scheduledTimerWithTimeInterval:0.02 target:self selector:@selector(tick) userInfo:nil repeats:YES];
+            _timer = [NSTimer scheduledTimerWithTimeInterval:0.05 target:self selector:@selector(tick) userInfo:nil repeats:YES];
             [NSRunLoop.mainRunLoop addTimer:_timer forMode:NSRunLoopCommonModes];
             break;
         case CRStateRunning:
@@ -399,46 +490,94 @@ static void CRSaveColor(NSString *key, UIColor *c) {
 }
 
 - (void)showTime:(NSTimeInterval)t {
-    int cs = (int)(t * 100) % 100;
-    int s  = (int)t % 60;
-    int m  = ((int)t / 60) % 60;
-    int h  = (int)t / 3600;
-    NSString *main = h > 0 ? [NSString stringWithFormat:@"%d:%02d:%02d", h, m, s]
-                           : [NSString stringWithFormat:@"%d:%02d", m, s];
-    NSString *dec = [NSString stringWithFormat:@".%02d", cs];
+    int total = (int)t;
+    NSArray<NSString *> *txt = @[
+        [NSString stringWithFormat:@"%02dh", total / 3600],
+        [NSString stringWithFormat:@"%02dm", (total / 60) % 60],
+        [NSString stringWithFormat:@"%02ds", total % 60]
+    ];
     UIColor *c = (_state == CRStatePaused) ? _pauseColor : _runColor;
-
-    NSMutableAttributedString *a = [[NSMutableAttributedString alloc] initWithString:main attributes:@{
-        NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:46 weight:UIFontWeightSemibold],
-        NSForegroundColorAttributeName: c }];
-    [a appendAttributedString:[[NSAttributedString alloc] initWithString:dec attributes:@{
-        NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:26 weight:UIFontWeightSemibold],
-        NSForegroundColorAttributeName: c }]];
-    _timeLabel.attributedText = a;
+    for (NSInteger i = 0; i < 3; i++) {
+        UILabel *l = (UILabel *)_pills[i].subviews[2];
+        l.text = txt[i];
+        l.textColor = c;
+    }
 }
 
 #pragma mark Style
 
 - (void)applyStyle {
     _box.transform = CGAffineTransformMakeScale(_scale, _scale);
-    _tint.backgroundColor = [_bgColor colorWithAlphaComponent:_bgOpacity];
+    UIColor *veil = [_bgColor colorWithAlphaComponent:_bgOpacity];
+    for (UIView *p in _pills) p.subviews[1].backgroundColor = veil;
+    _fpsPill.subviews[0].backgroundColor = veil;
     _textLabel.textColor = _textColor;
     _textLabel.text = _text;
     [self showTime:[self elapsed]];
 }
 
-- (void)applyWidth {
-    _box.bounds = CGRectMake(0, 0, _width, 100);
-    _textLabel.frame = CGRectMake(0, 0, _width, 22);
-    _card.frame = CGRectMake(0, 24, _width, 76);
-    _bg.frame = _card.bounds;
-    _tint.frame = _card.bounds;
-    _timeLabel.frame = CGRectMake(10, 0, _width - 20, 76);
+#pragma mark FPS
+
+- (void)updateFPS {
+    [_fpsTimer invalidate];
+    _fpsTimer = nil;
+    _fpsPill.hidden = !_showFPS;
+    if (!_showFPS) return;
+    _lastFrames = __atomic_load_n(&gFrames, __ATOMIC_RELAXED);
+    _lastFpsTime = CACurrentMediaTime();
+    _fpsTimer = [NSTimer scheduledTimerWithTimeInterval:0.5 target:self selector:@selector(fpsTick) userInfo:nil repeats:YES];
+    [NSRunLoop.mainRunLoop addTimer:_fpsTimer forMode:NSRunLoopCommonModes];
 }
 
-#pragma mark Mode 4K
+- (void)fpsTick {
+    CFTimeInterval now = CACurrentMediaTime();
+    int64_t f = __atomic_load_n(&gFrames, __ATOMIC_RELAXED);
+    double dt = now - _lastFpsTime;
+    int v = dt > 0 ? (int)lround((double)(f - _lastFrames) / dt) : 0;
+    _lastFrames = f;
+    _lastFpsTime = now;
 
-// Suréchantillonne le rendu du jeu (vues Metal/GL) vers ~3840 px sur le grand côté.
+    if (v <= 0) {
+        _fpsLabel.text = @"-- FPS";
+        _fpsLabel.textColor = UIColor.whiteColor;
+        return;
+    }
+    _fpsLabel.text = [NSString stringWithFormat:@"%d FPS", v];
+    if (v >= 50)      _fpsLabel.textColor = [UIColor colorWithRed:0.24 green:0.86 blue:0.52 alpha:1];
+    else if (v >= 30) _fpsLabel.textColor = [UIColor colorWithRed:1.00 green:0.69 blue:0.13 alpha:1];
+    else              _fpsLabel.textColor = [UIColor colorWithRed:1.00 green:0.32 blue:0.32 alpha:1];
+}
+
+#pragma mark Saturation
+
+// Saturation de l'écran du jeu : 1 à 100 (50 = normal)
+- (void)applySaturation {
+    if (!_gameWindow) return;
+    if (fabs(_saturation - 50) < 0.5) {
+        _gameWindow.layer.filters = nil;
+        return;
+    }
+    Class cls = NSClassFromString(@"CAFilter");
+    SEL sel = NSSelectorFromString(@"filterWithType:");
+    if (!cls || ![cls respondsToSelector:sel]) return;
+    id f = [cls performSelector:sel withObject:@"colorSaturate"];
+    if (!f) return;
+    [f setValue:@(_saturation / 50.0) forKey:@"inputAmount"];
+    _gameWindow.layer.filters = @[f];
+}
+
+#pragma mark Résolution du jeu
+
+// Bas = 1280 px, Normal = d'origine, 2K = 2560 px, 4K = 3840 px (sur le grand côté)
+- (CGFloat)targetPixels {
+    switch (_resMode) {
+        case 0: return 1280;
+        case 2: return 2560;
+        case 3: return 3840;
+        default: return 0;
+    }
+}
+
 - (void)collectRenderViews:(UIView *)v into:(NSMutableArray *)out {
     Class metal = NSClassFromString(@"CAMetalLayer");
     Class eagl = NSClassFromString(@"CAEAGLLayer");
@@ -458,12 +597,13 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     [v setNeedsLayout];
 }
 
-- (void)applyResolution {
-    if (!_gameWindow) return;
+- (void)applyResolutionNow {
+    CGFloat px = [self targetPixels];
+    if (!_gameWindow || px <= 0) return;
     CGSize b = _gameWindow.bounds.size;
     CGFloat longSide = MAX(b.width, b.height);
     if (longSide <= 0) return;
-    CGFloat target = MIN(5.0, 3840.0 / longSide);
+    CGFloat target = MIN(6.0, px / longSide);
     NSMutableArray *views = [NSMutableArray array];
     [self collectRenderViews:_gameWindow into:views];
     for (UIView *v in views) {
@@ -472,18 +612,19 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     }
 }
 
-- (void)apply4K {
+- (void)applyResolution {
     [_resTimer invalidate];
     _resTimer = nil;
     if (!_origScale) _origScale = [NSMapTable weakToStrongObjectsMapTable];
     if (!_gameWindow) return;
-    if (_fourK) {
-        [self applyResolution];
+
+    if (_resMode != 1) {
+        [self applyResolutionNow];
         // Le jeu peut remettre sa résolution : on la réapplique régulièrement
-        _resTimer = [NSTimer scheduledTimerWithTimeInterval:2.0 target:self selector:@selector(applyResolution) userInfo:nil repeats:YES];
+        _resTimer = [NSTimer scheduledTimerWithTimeInterval:2.0 target:self selector:@selector(applyResolutionNow) userInfo:nil repeats:YES];
         return;
     }
-    // Retour à la résolution normale
+    // Normal : retour à la résolution d'origine
     NSMutableArray *views = [NSMutableArray array];
     [self collectRenderViews:_gameWindow into:views];
     for (UIView *v in views) {
@@ -491,22 +632,6 @@ static void CRSaveColor(NSString *key, UIColor *c) {
         if (o) [self setScale:o.doubleValue forRenderView:v];
         [_origScale removeObjectForKey:v];
     }
-}
-
-// Saturation de l'écran du jeu : 1 à 100 (50 = normal)
-- (void)applySaturation {
-    if (!_gameWindow) return;
-    if (fabs(_saturation - 50) < 0.5) {
-        _gameWindow.layer.filters = nil;
-        return;
-    }
-    Class cls = NSClassFromString(@"CAFilter");
-    SEL sel = NSSelectorFromString(@"filterWithType:");
-    if (!cls || ![cls respondsToSelector:sel]) return;
-    id f = [cls performSelector:sel withObject:@"colorSaturate"];
-    if (!f) return;
-    [f setValue:@(_saturation / 50.0) forKey:@"inputAmount"];
-    _gameWindow.layer.filters = @[f];
 }
 
 #pragma mark Réglages
@@ -517,6 +642,7 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     _panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, pw, 400)];
     _panel.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.96];
     _panel.layer.cornerRadius = 16;
+    _panel.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     _panel.hidden = YES;
     [_rootVC.view addSubview:_panel];
 
@@ -532,14 +658,24 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     // Taille
     [_scroll addSubview:[self labelText:@"Taille" frame:CGRectMake(16, y, W, 20) size:14]];
     y += 22;
-    [_scroll addSubview:[self sliderMin:0.4 max:1.4 value:_scale frame:CGRectMake(16, y, W, 30) action:@selector(sizeChanged:)]];
+    [_scroll addSubview:[self sliderMin:0.4 max:1.6 value:_scale frame:CGRectMake(16, y, W, 30) action:@selector(sizeChanged:)]];
     y += 42;
 
     // Longueur
     [_scroll addSubview:[self labelText:@"Longueur" frame:CGRectMake(16, y, W, 20) size:14]];
     y += 22;
-    [_scroll addSubview:[self sliderMin:160 max:420 value:_width frame:CGRectMake(16, y, W, 30) action:@selector(widthChanged:)]];
+    [_scroll addSubview:[self sliderMin:120 max:420 value:_width frame:CGRectMake(16, y, W, 30) action:@selector(widthChanged:)]];
     y += 42;
+
+    // Résolution du jeu
+    [_scroll addSubview:[self labelText:@"Résolution du jeu" frame:CGRectMake(16, y, W, 20) size:14]];
+    y += 24;
+    UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"Bas", @"Normal", @"2K", @"4K"]];
+    seg.frame = CGRectMake(16, y, W, 32);
+    seg.selectedSegmentIndex = _resMode;
+    [seg addTarget:self action:@selector(resChanged:) forControlEvents:UIControlEventValueChanged];
+    [_scroll addSubview:seg];
+    y += 46;
 
     // Saturation
     [_scroll addSubview:[self labelText:@"Saturation du jeu (50 = normal)" frame:CGRectMake(16, y, W - 50, 20) size:14]];
@@ -550,12 +686,12 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     [_scroll addSubview:[self sliderMin:1 max:100 value:_saturation frame:CGRectMake(16, y, W, 30) action:@selector(satChanged:)]];
     y += 42;
 
-    // Mode 4K
-    [_scroll addSubview:[self labelText:@"Mode 4K (résolution du jeu)" frame:CGRectMake(16, y + 6, W - 60, 20) size:14]];
-    UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(16 + W - 51, y, 51, 31)];
-    sw.on = _fourK;
-    [sw addTarget:self action:@selector(fourKChanged:) forControlEvents:UIControlEventValueChanged];
-    [_scroll addSubview:sw];
+    // Afficher les FPS
+    [_scroll addSubview:[self labelText:@"Afficher les FPS" frame:CGRectMake(16, y + 6, W - 60, 20) size:14]];
+    UISwitch *fs = [[UISwitch alloc] initWithFrame:CGRectMake(16 + W - 51, y, 51, 31)];
+    fs.on = _showFPS;
+    [fs addTarget:self action:@selector(fpsChanged:) forControlEvents:UIControlEventValueChanged];
+    [_scroll addSubview:fs];
     y += 46;
 
     // Barre d'état iPhone
@@ -567,9 +703,9 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     y += 46;
 
     // Couleurs
-    y = [self colorRow:@"Chrono en marche" tag:1 color:_runColor y:y width:W];
-    y = [self colorRow:@"Chrono en pause" tag:2 color:_pauseColor y:y width:W];
-    y = [self colorRow:@"Fond du chrono" tag:3 color:_bgColor y:y width:W];
+    y = [self colorRow:@"Chiffres en marche" tag:1 color:_runColor y:y width:W];
+    y = [self colorRow:@"Chiffres en pause" tag:2 color:_pauseColor y:y width:W];
+    y = [self colorRow:@"Fond des cases" tag:3 color:_bgColor y:y width:W];
     y = [self colorRow:@"Couleur du texte" tag:4 color:_textColor y:y width:W];
 
     // Opacité du fond
@@ -647,6 +783,18 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     [self savePrefs];
 }
 
+- (void)widthChanged:(UISlider *)s {
+    _width = roundf(s.value);
+    [self layoutPills];
+    [self savePrefs];
+}
+
+- (void)resChanged:(UISegmentedControl *)s {
+    _resMode = s.selectedSegmentIndex;
+    [self applyResolution];
+    [self savePrefs];
+}
+
 - (void)satChanged:(UISlider *)s {
     _saturation = roundf(s.value);
     _satValue.text = [NSString stringWithFormat:@"%d", (int)_saturation];
@@ -654,20 +802,14 @@ static void CRSaveColor(NSString *key, UIColor *c) {
     [self savePrefs];
 }
 
+- (void)fpsChanged:(UISwitch *)s {
+    _showFPS = s.on;
+    [self updateFPS];
+    [self savePrefs];
+}
+
 - (void)statusBarChanged:(UISwitch *)s {
     self.hideStatusBar = s.on;
-    [self savePrefs];
-}
-
-- (void)widthChanged:(UISlider *)s {
-    _width = roundf(s.value);
-    [self applyWidth];
-    [self savePrefs];
-}
-
-- (void)fourKChanged:(UISwitch *)s {
-    _fourK = s.on;
-    [self apply4K];
     [self savePrefs];
 }
 
@@ -732,7 +874,7 @@ static void CRSaveColor(NSString *key, UIColor *c) {
 
 - (void)removeImage {
     [NSFileManager.defaultManager removeItemAtPath:CRImagePath() error:nil];
-    _bg.image = nil;
+    [self setPillImage:nil];
 }
 
 - (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results {
@@ -744,7 +886,7 @@ static void CRSaveColor(NSString *key, UIColor *c) {
         UIImage *img = (UIImage *)obj;
         NSData *d = UIImageJPEGRepresentation(img, 0.85);
         [d writeToFile:CRImagePath() atomically:YES];
-        dispatch_async(dispatch_get_main_queue(), ^{ self->_bg.image = img; });
+        dispatch_async(dispatch_get_main_queue(), ^{ [self setPillImage:img]; });
     }];
 }
 
@@ -754,6 +896,7 @@ static void CRSaveColor(NSString *key, UIColor *c) {
 
 __attribute__((constructor))
 static void CRInit(void) {
+    CRHookFrames();   // doit être posé avant que le jeu ne commence à afficher
     dispatch_async(dispatch_get_main_queue(), ^{
         [[CRChrono shared] installWhenReady];
     });
