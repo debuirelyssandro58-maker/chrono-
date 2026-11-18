@@ -190,7 +190,7 @@ static UISwitch *AddSwitch(UIView *p, CGFloat x, CGFloat y, BOOL on, id target, 
 @property (nonatomic, strong) UILabel *lenLabel;
 @property (nonatomic, strong) UILabel *zoomLabel;
 @property (nonatomic, strong) UILabel *satLabel;
-@property (nonatomic, strong) UIButton *copyBtn;
+@property (nonatomic, strong) UIButton *pseudoBtn;
 - (instancetype)initWithFrame:(CGRect)f chrono:(ChronoView *)c;
 @end
 
@@ -764,7 +764,7 @@ static void ScaleTree(UIView *v, CGFloat f) {
     y += 32;
     AddLabel(p, @"Ajoute g420262 sur TikTok pour avoir de l'aide.", x, y, iw, 44, 15, UIColor.whiteColor, NO);
     y += 56;
-    self.copyBtn = AddButton(p, @"Copier g420262", CGRectMake(x, y, iw, 42), kGreen, UIColor.blackColor, self, @selector(copyHandle));
+    self.pseudoBtn = AddButton(p, @"Copier g420262", CGRectMake(x, y, iw, 42), kGreen, UIColor.blackColor, self, @selector(onCopyPseudo));
     y += 60;
     AddLabel(p, @"dylib by Ragnar", x, y, iw, 18, 12, kGray, NO);
     y += 30;
@@ -837,12 +837,12 @@ static void ScaleTree(UIView *v, CGFloat f) {
     [[GameTools shared] setStatusBarHidden:s.isOn];
 }
 
-- (void)copyHandle {
+- (void)onCopyPseudo {
     [UIPasteboard generalPasteboard].string = @"g420262";
-    [self.copyBtn setTitle:@"Copié ✓" forState:UIControlStateNormal];
+    [self.pseudoBtn setTitle:@"Copié ✓" forState:UIControlStateNormal];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        [self.copyBtn setTitle:@"Copier g420262" forState:UIControlStateNormal];
+        [self.pseudoBtn setTitle:@"Copier g420262" forState:UIControlStateNormal];
     });
 }
 
