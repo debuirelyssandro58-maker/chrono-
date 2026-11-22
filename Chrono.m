@@ -1,4 +1,4 @@
-// Chrono v7.2 - dylib by Ragnar
+// Chrono v7.3 - dylib by Ragnar
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
@@ -25,6 +25,24 @@ static NSInteger DefInt(NSString *k, NSInteger d) {
 static BOOL DefBool(NSString *k, BOOL d) {
     NSNumber *o = [Defs() objectForKey:k];
     return o ? o.boolValue : d;
+}
+
+static BOOL gCrumbsOn = YES;
+static NSString *gCrashStage = nil;
+
+static NSString *CrumbPath(void) {
+    return [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Caches/chrono_crumb.txt"];
+}
+
+// Écrit l'étape en cours dans un petit fichier : si le jeu plante, on saura où.
+static void Crumb(const char *stage) {
+    if (!gCrumbsOn) return;
+    FILE *f = fopen(CrumbPath().fileSystemRepresentation, "w");
+    if (f) { fputs(stage, f); fclose(f); }
+}
+
+static NSString *ReadCrumb(void) {
+    return [NSString stringWithContentsOfFile:CrumbPath() encoding:NSUTF8StringEncoding error:nil];
 }
 
 static UIWindow *KeyWindow(void) {
@@ -985,10 +1003,15 @@ static void ScaleTree(UIView *v, CGFloat f) {
     self.timerH = (CGFloat)MAX(36.0, MIN(120.0, DefFloat(@"chrono.height", 56)));
     self.zoomVal = (CGFloat)MAX(0.5, MIN(1.5, DefFloat(@"chrono.zoom", 1.0)));
     self.opacityVal = (CGFloat)MAX(0.2, MIN(1.0, DefFloat(@"chrono.opacity", 1.0)));
+    Crumb("cfg-layout");
     [self relayout];
+    Crumb("cfg-bg");
     [self refreshBackground];
+    Crumb("cfg-refresh");
     [self refresh];
+    Crumb("cfg-zoom");
     [self applyZoom];
+    Crumb("cfg-done");
 }
 
 - (void)relayout {
@@ -1128,6 +1151,7 @@ static void ScaleTree(UIView *v, CGFloat f) {
 - (void)renderLiveSplit:(NSTimeInterval)t color:(UIColor *)col {
     CGSize size = self.box.bounds.size;
     if (size.width < 10 || size.height < 10) return;
+    Crumb("render");
     CGFloat scale = [UIScreen mainScreen].scale * self.zoomVal;
     CGFloat maxW = size.width - 24.0;
     NSAttributedString *a = LiveSplitText(t, UIColor.whiteColor, self.timerH);
@@ -1805,9 +1829,9 @@ static ChronoView *gChrono = nil;
 
 static BOOL gSafeMode = NO;
 
-static void ShowBanner(UIWindow *w) {
+static void ShowBanner(UIWindow *w, NSString *text) {
     UILabel *l = [[UILabel alloc] init];
-    l.text = gSafeMode ? @"dylib by Ragnar · mode sûr" : @"dylib by Ragnar";
+    l.text = text;
     l.font = [UIFont boldSystemFontOfSize:15];
     l.textColor = UIColor.whiteColor;
     l.textAlignment = NSTextAlignmentCenter;
@@ -1819,14 +1843,16 @@ static void ShowBanner(UIWindow *w) {
     l.tag = kOverlayTag;
     l.userInteractionEnabled = NO;
     [l sizeToFit];
-    CGFloat bw = l.bounds.size.width + 36;
+    CGFloat bw = MIN(l.bounds.size.width + 36, w.bounds.size.width - 20);
     CGFloat bh = 34;
     l.frame = CGRectMake((w.bounds.size.width - bw) / 2, w.safeAreaInsets.top + 10, bw, bh);
     l.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin;
+    l.adjustsFontSizeToFitWidth = YES;
+    l.minimumScaleFactor = 0.6;
     l.alpha = 0;
     [w addSubview:l];
     [UIView animateWithDuration:0.35 animations:^{ l.alpha = 1; } completion:^(BOOL f) {
-        [UIView animateWithDuration:0.5 delay:2.5 options:0 animations:^{ l.alpha = 0; } completion:^(BOOL f2) {
+        [UIView animateWithDuration:0.5 delay:(gSafeMode ? 6.0 : 2.5) options:0 animations:^{ l.alpha = 0; } completion:^(BOOL f2) {
             [l removeFromSuperview];
         }];
     }];
@@ -1843,15 +1869,28 @@ static void ShowChrono(void) {
         }
         return;
     }
-    gChrono = [[ChronoView alloc] initWithFrame:CGRectMake(20, 110, 252, 82)];
-    [w addSubview:gChrono];
-    [gChrono applyConfig];
-    ShowBanner(w);
-    if (!gSafeMode) {
-        // Les réglages du jeu (Blitz, pièces, FPS...) ne sont réappliqués que bien après le démarrage.
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ [[GameTools shared] reapplyAll]; });
+    if (gSafeMode) {
+        // Le lancement précédent a planté : on n'affiche que le message, avec l'étape du plantage.
+        gChrono = (ChronoView *)[[UIView alloc] init];
+        ShowBanner(w, [NSString stringWithFormat:@"dylib by Ragnar · mode sûr · dernier : %@", gCrashStage]);
+        return;
     }
+    Crumb("chrono-init");
+    gChrono = [[ChronoView alloc] initWithFrame:CGRectMake(20, 110, 252, 82)];
+    Crumb("chrono-add");
+    [w addSubview:gChrono];
+    Crumb("chrono-config");
+    [gChrono applyConfig];
+    Crumb("banner");
+    ShowBanner(w, @"dylib by Ragnar");
+    Crumb("banner-ok");
+    // Les réglages du jeu (Blitz, pièces, FPS...) ne sont réappliqués que bien après le démarrage.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        Crumb("reapply");
+        [[GameTools shared] reapplyAll];
+        Crumb("ready");
+    });
 }
 
 __attribute__((constructor))
@@ -1863,20 +1902,21 @@ static void chrono_init(void) {
                 usingBlock:^(NSNotification *n) {
         static dispatch_once_t once;
         dispatch_once(&once, ^{
-            // Protection : si le lancement précédent a planté avant 12 s, on démarre en mode sûr
-            // (tous les réglages du jeu sont coupés).
-            gSafeMode = [Defs() boolForKey:@"boot.pending"];
+            // Si le lancement précédent s'est arrêté avant la fin du démarrage, on passe en mode sûr.
+            NSString *prev = ReadCrumb();
+            BOOL clean = (prev.length == 0) || [prev isEqualToString:@"ok"] || [prev isEqualToString:@"ready"];
+            gSafeMode = !clean;
+            gCrashStage = prev;
             if (gSafeMode) {
                 for (NSString *k in @[@"game.blitz", @"game.coins", @"game.fps", @"game.res", @"game.sat", @"game.hidebar"]) {
                     [Defs() removeObjectForKey:k];
                 }
             }
-            [Defs() setBool:YES forKey:@"boot.pending"];
-            [Defs() synchronize];
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12.0 * NSEC_PER_SEC)),
+            Crumb("boot");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(14.0 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
-                [Defs() setBool:NO forKey:@"boot.pending"];
-                [Defs() synchronize];
+                Crumb("ok");
+                gCrumbsOn = NO;
             });
         });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
