@@ -1,7 +1,8 @@
-// Chrono v5 - dylib by Ragnar
+// Chrono v6 - dylib by Ragnar
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
+#import <dlfcn.h>
 
 #define COL(r,g,b) [UIColor colorWithRed:(r)/255.0 green:(g)/255.0 blue:(b)/255.0 alpha:1.0]
 #define kOverlayTag 7777001
@@ -117,8 +118,8 @@ static UISegmentedControl *AddSegment(UIView *p, NSArray *items, CGRect f, NSInt
     s.selectedSegmentIndex = sel;
     s.selectedSegmentTintColor = kGreen;
     s.backgroundColor = COL(44,44,46);
-    [s setTitleTextAttributes:@{NSForegroundColorAttributeName: UIColor.whiteColor} forState:UIControlStateNormal];
-    [s setTitleTextAttributes:@{NSForegroundColorAttributeName: UIColor.blackColor} forState:UIControlStateSelected];
+    [s setTitleTextAttributes:@{NSForegroundColorAttributeName: UIColor.whiteColor, NSFontAttributeName: [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold]} forState:UIControlStateNormal];
+    [s setTitleTextAttributes:@{NSForegroundColorAttributeName: UIColor.blackColor, NSFontAttributeName: [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold]} forState:UIControlStateSelected];
     [s addTarget:target action:action forControlEvents:UIControlEventValueChanged];
     [p addSubview:s];
     return s;
@@ -151,7 +152,12 @@ static UISwitch *AddSwitch(UIView *p, CGFloat x, CGFloat y, BOOL on, id target, 
 @property (nonatomic, strong) CADisplayLink *link;
 @property (nonatomic) CFTimeInterval lastStamp;
 @property (nonatomic) int frames;
+@property (nonatomic, strong) UIButton *blitzBtn;
+@property (nonatomic) BOOL blitzActive;
 + (instancetype)shared;
+- (void)setBlitzEnabled:(BOOL)on;
+- (void)applyBlitz;
+- (void)toggleBlitz;
 - (void)setFPSEnabled:(BOOL)on;
 - (void)applyResolution:(NSInteger)idx;
 - (void)applySaturation:(double)v;
@@ -191,6 +197,8 @@ static UISwitch *AddSwitch(UIView *p, CGFloat x, CGFloat y, BOOL on, id target, 
 @property (nonatomic, strong) UILabel *zoomLabel;
 @property (nonatomic, strong) UILabel *satLabel;
 @property (nonatomic, strong) UIButton *pseudoBtn;
+@property (nonatomic, strong) UIView *ttView;
+@property (nonatomic, strong) UIButton *ttCopyBtn;
 - (instancetype)initWithFrame:(CGRect)f chrono:(ChronoView *)c;
 @end
 
@@ -225,6 +233,23 @@ static void ScaleTree(UIView *v, CGFloat f) {
         }
     }
     for (UIView *sub in v.subviews) ScaleTree(sub, f);
+}
+
+typedef void (*TimeScaleFn)(float);
+typedef void *(*ResolveIcallFn)(const char *);
+
+static void SetUnityTimeScale(float v) {
+    static TimeScaleFn fn = NULL;
+    if (!fn) {
+        ResolveIcallFn resolve = (ResolveIcallFn)dlsym(RTLD_DEFAULT, "il2cpp_resolve_icall");
+        if (resolve) fn = (TimeScaleFn)resolve("UnityEngine.Time::set_timeScale(System.Single)");
+    }
+    if (fn) fn(v);
+}
+
+static float BlitzMultiplier(void) {
+    NSInteger i = DefInt(@"game.blitzmul", 2);
+    return (i == 0) ? 1.5f : ((i == 1) ? 2.0f : 3.0f);
 }
 
 @implementation GameTools
@@ -320,7 +345,70 @@ static void ScaleTree(UIView *v, CGFloat f) {
     [KeyWindow().rootViewController setNeedsStatusBarAppearanceUpdate];
 }
 
+- (void)updateBlitzTitle {
+    if (!self.blitzBtn) return;
+    if (self.blitzActive) {
+        [self.blitzBtn setTitle:@"⚡ BLITZ ON" forState:UIControlStateNormal];
+        [self.blitzBtn setTitleColor:UIColor.blackColor forState:UIControlStateNormal];
+        self.blitzBtn.backgroundColor = kGreen;
+    } else {
+        [self.blitzBtn setTitle:@"⚡ BLITZ OFF" forState:UIControlStateNormal];
+        [self.blitzBtn setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+        self.blitzBtn.backgroundColor = [UIColor colorWithWhite:0 alpha:0.78];
+    }
+}
+
+- (void)applyBlitz {
+    if (self.blitzActive) SetUnityTimeScale(BlitzMultiplier());
+}
+
+- (void)toggleBlitz {
+    self.blitzActive = !self.blitzActive;
+    if (self.blitzActive) SetUnityTimeScale(BlitzMultiplier());
+    else SetUnityTimeScale(1.0f);
+    [self updateBlitzTitle];
+}
+
+- (void)dragBlitz:(UIPanGestureRecognizer *)g {
+    UIView *v = g.view;
+    UIView *sup = v.superview;
+    if (!sup) return;
+    CGPoint d = [g translationInView:sup];
+    v.center = CGPointMake(v.center.x + d.x, v.center.y + d.y);
+    [g setTranslation:CGPointZero inView:sup];
+}
+
+- (void)setBlitzEnabled:(BOOL)on {
+    if (on) {
+        UIWindow *w = KeyWindow();
+        if (!w) return;
+        if (!self.blitzBtn) {
+            UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
+            b.frame = CGRectMake(0, 0, 116, 36);
+            b.titleLabel.font = [UIFont boldSystemFontOfSize:14];
+            b.layer.cornerRadius = 18;
+            b.layer.borderWidth = 1;
+            b.layer.borderColor = kBorder.CGColor;
+            b.tag = kOverlayTag;
+            [b addTarget:self action:@selector(toggleBlitz) forControlEvents:UIControlEventTouchUpInside];
+            UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dragBlitz:)];
+            [b addGestureRecognizer:pan];
+            b.center = CGPointMake(w.bounds.size.width - 74, w.bounds.size.height * 0.45);
+            self.blitzBtn = b;
+        }
+        if (self.blitzBtn.superview != w) [w addSubview:self.blitzBtn];
+        self.blitzBtn.hidden = NO;
+        [self updateBlitzTitle];
+    } else {
+        if (self.blitzActive) SetUnityTimeScale(1.0f);
+        self.blitzActive = NO;
+        self.blitzBtn.hidden = YES;
+        [self updateBlitzTitle];
+    }
+}
+
 - (void)reapplyAll {
+    [self setBlitzEnabled:DefBool(@"game.blitz", NO)];
     [self setFPSEnabled:DefBool(@"game.fps", NO)];
     [self applyResolution:DefInt(@"game.res", 2)];
     [self applySaturation:DefFloat(@"game.sat", 50)];
@@ -627,7 +715,16 @@ static void ScaleTree(UIView *v, CGFloat f) {
         _card.clipsToBounds = YES;
         [self addSubview:_card];
 
-        AddLabel(_card, @"Réglages", 16, 12, cw - 70, 24, 18, UIColor.whiteColor, YES);
+        AddLabel(_card, @"Réglages", 16, 12, cw - 110, 24, 18, UIColor.whiteColor, YES);
+        UIButton *tt = [UIButton buttonWithType:UIButtonTypeCustom];
+        tt.frame = CGRectMake(cw - 88, 9, 32, 32);
+        tt.backgroundColor = COL(44,44,46);
+        tt.layer.cornerRadius = 16;
+        [tt setTitle:@"♪" forState:UIControlStateNormal];
+        [tt setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+        tt.titleLabel.font = [UIFont boldSystemFontOfSize:18];
+        [tt addTarget:self action:@selector(openTikTok) forControlEvents:UIControlEventTouchUpInside];
+        [_card addSubview:tt];
         UIButton *close = [UIButton buttonWithType:UIButtonTypeCustom];
         close.frame = CGRectMake(cw - 46, 8, 34, 32);
         [close setTitle:@"✕" forState:UIControlStateNormal];
@@ -636,10 +733,10 @@ static void ScaleTree(UIView *v, CGFloat f) {
         [close addTarget:self action:@selector(dismiss) forControlEvents:UIControlEventTouchUpInside];
         [_card addSubview:close];
 
-        AddSegment(_card, @[@"Chrono", @"Image", @"Jeu", @"Aide"], CGRectMake(12, 44, cw - 24, 30), 0, self, @selector(tabChanged:));
+        AddSegment(_card, @[@"Chrono", @"Image", @"Jeu", @"Écran", @"Aide"], CGRectMake(12, 44, cw - 24, 30), 0, self, @selector(tabChanged:));
 
         NSMutableArray *pages = [NSMutableArray array];
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < 5; i++) {
             UIScrollView *sv = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 84, cw, ch - 84)];
             sv.hidden = (i != 0);
             [_card addSubview:sv];
@@ -647,14 +744,16 @@ static void ScaleTree(UIView *v, CGFloat f) {
         }
         _pages = pages;
 
-        CGFloat h0 = [self buildChronoPage:pages[0] width:cw];
-        CGFloat h1 = [self buildImagePage:pages[1] width:cw];
-        CGFloat h2 = [self buildGamePage:pages[2] width:cw];
-        CGFloat h3 = [self buildHelpPage:pages[3] width:cw];
-        ((UIScrollView *)pages[0]).contentSize = CGSizeMake(cw, h0);
-        ((UIScrollView *)pages[1]).contentSize = CGSizeMake(cw, h1);
-        ((UIScrollView *)pages[2]).contentSize = CGSizeMake(cw, h2);
-        ((UIScrollView *)pages[3]).contentSize = CGSizeMake(cw, h3);
+        CGFloat hs[5];
+        hs[0] = [self buildChronoPage:pages[0] width:cw];
+        hs[1] = [self buildImagePage:pages[1] width:cw];
+        hs[2] = [self buildGamePage:pages[2] width:cw];
+        hs[3] = [self buildScreenPage:pages[3] width:cw];
+        hs[4] = [self buildHelpPage:pages[4] width:cw];
+        for (int i = 0; i < 5; i++) {
+            ((UIScrollView *)pages[i]).contentSize = CGSizeMake(cw, hs[i]);
+        }
+        [self buildTikTokPage:cw height:ch];
     }
     return self;
 }
@@ -734,6 +833,20 @@ static void ScaleTree(UIView *v, CGFloat f) {
 
 - (CGFloat)buildGamePage:(UIScrollView *)p width:(CGFloat)w {
     CGFloat x = 16, iw = w - 32, y = 8;
+    AddLabel(p, @"Mode Blitz", x, y + 5, iw - 60, 22, 15, UIColor.whiteColor, NO);
+    AddSwitch(p, x + iw - 51, y, DefBool(@"game.blitz", NO), self, @selector(blitzChanged:));
+    y += 44;
+    AddLabel(p, @"Vitesse du Blitz", x, y, iw, 18, 13, kGray, NO);
+    y += 22;
+    AddSegment(p, @[@"x1.5", @"x2", @"x3"], CGRectMake(x, y, iw, 32), DefInt(@"game.blitzmul", 2), self, @selector(blitzMulChanged:));
+    y += 46;
+    AddLabel(p, @"Un bouton ⚡ BLITZ apparaît à l'écran (tu peux le déplacer). Laisse-le sur OFF pendant les boosts du début, puis appuie dessus quand tu prends l'étoile de fin de boost. Si la vitesse retombe, appuie sur OFF puis ON.", x, y, iw, 120, 12, kGray, NO);
+    y += 130;
+    return y;
+}
+
+- (CGFloat)buildScreenPage:(UIScrollView *)p width:(CGFloat)w {
+    CGFloat x = 16, iw = w - 32, y = 8;
 
     AddLabel(p, @"Compteur FPS", x, y + 5, iw - 60, 22, 15, UIColor.whiteColor, NO);
     AddSwitch(p, x + iw - 51, y, DefBool(@"game.fps", NO), self, @selector(fpsChanged:));
@@ -771,7 +884,61 @@ static void ScaleTree(UIView *v, CGFloat f) {
     return y;
 }
 
+- (void)buildTikTokPage:(CGFloat)cw height:(CGFloat)ch {
+    UIView *v = [[UIView alloc] initWithFrame:CGRectMake(0, 0, cw, ch)];
+    v.backgroundColor = kPanelBG;
+    v.hidden = YES;
+    [self.card addSubview:v];
+    self.ttView = v;
+
+    UIButton *back = [UIButton buttonWithType:UIButtonTypeCustom];
+    back.frame = CGRectMake(10, 8, 100, 32);
+    [back setTitle:@"‹ Retour" forState:UIControlStateNormal];
+    [back setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    back.titleLabel.font = [UIFont boldSystemFontOfSize:16];
+    back.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+    [back addTarget:self action:@selector(closeTikTok) forControlEvents:UIControlEventTouchUpInside];
+    [v addSubview:back];
+
+    UILabel *t = AddLabel(v, @"TikTok", 0, 60, cw, 28, 20, UIColor.whiteColor, YES);
+    t.textAlignment = NSTextAlignmentCenter;
+    UILabel *l = AddLabel(v, @"mon tiktok : kit.563", 12, 110, cw - 24, 36, 22, kGreen, YES);
+    l.textAlignment = NSTextAlignmentCenter;
+    l.adjustsFontSizeToFitWidth = YES;
+    l.minimumScaleFactor = 0.6;
+    l.numberOfLines = 1;
+    self.ttCopyBtn = AddButton(v, @"Copier kit.563", CGRectMake(40, 168, cw - 80, 42), kGreen, UIColor.blackColor, self, @selector(onCopyKit));
+}
+
 #pragma mark Actions
+
+- (void)openTikTok {
+    [self.card bringSubviewToFront:self.ttView];
+    self.ttView.hidden = NO;
+}
+
+- (void)closeTikTok {
+    self.ttView.hidden = YES;
+}
+
+- (void)onCopyKit {
+    [UIPasteboard generalPasteboard].string = @"kit.563";
+    [self.ttCopyBtn setTitle:@"Copié ✓" forState:UIControlStateNormal];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [self.ttCopyBtn setTitle:@"Copier kit.563" forState:UIControlStateNormal];
+    });
+}
+
+- (void)blitzChanged:(UISwitch *)s {
+    [Defs() setBool:s.isOn forKey:@"game.blitz"];
+    [[GameTools shared] setBlitzEnabled:s.isOn];
+}
+
+- (void)blitzMulChanged:(UISegmentedControl *)s {
+    [Defs() setInteger:s.selectedSegmentIndex forKey:@"game.blitzmul"];
+    [[GameTools shared] applyBlitz];
+}
 
 - (void)refreshColorBtns {
     NSInteger sel = DefInt(@"chrono.accent", 0);
