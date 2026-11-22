@@ -1,4 +1,4 @@
-// Chrono v7 - dylib by Ragnar
+// Chrono v7.1 - dylib by Ragnar
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
@@ -277,8 +277,15 @@ typedef struct {
 
 static Il2Api gIl;
 
+static BOOL Il2Ready(void) {
+    typedef void *(*DomFn)(void);
+    DomFn d = (DomFn)dlsym(RTLD_DEFAULT, "il2cpp_domain_get");
+    return (d != NULL) && (d() != NULL);
+}
+
 static BOOL Il2Load(void) {
     if (gIl.ok) return YES;
+    if (!Il2Ready()) return NO;
 #define L(f, n) gIl.f = (__typeof__(gIl.f))dlsym(RTLD_DEFAULT, n)
     L(domain_get, "il2cpp_domain_get");
     L(thread_attach, "il2cpp_thread_attach");
@@ -333,6 +340,7 @@ static BOOL TimeScaleAvailable(void) {
 
 static void SetUnityTimeScale(float v) {
     static SetTimeScaleFn fn = NULL;
+    if (!Il2Ready()) return;
     if (!fn) {
         ResolveIcallFn r = (ResolveIcallFn)dlsym(RTLD_DEFAULT, "il2cpp_resolve_icall");
         if (r) fn = (SetTimeScaleFn)r("UnityEngine.Time::set_timeScale(System.Single)");
@@ -342,6 +350,7 @@ static void SetUnityTimeScale(float v) {
 
 static float GetUnityTimeScale(void) {
     static GetTimeScaleFn fn = NULL;
+    if (!Il2Ready()) return -1.0f;
     if (!fn) {
         ResolveIcallFn r = (ResolveIcallFn)dlsym(RTLD_DEFAULT, "il2cpp_resolve_icall");
         if (r) fn = (GetTimeScaleFn)r("UnityEngine.Time::get_timeScale()");
@@ -850,12 +859,12 @@ static void ScaleTree(UIView *v, CGFloat f) {
 }
 
 - (void)reapplyAll {
-    [self setBlitzEnabled:DefBool(@"game.blitz", NO)];
-    [self setCoinsHidden:DefBool(@"game.coins", NO)];
-    [self setFPSEnabled:DefBool(@"game.fps", NO)];
-    [self applyResolution:DefInt(@"game.res", 2)];
-    [self applySaturation:DefFloat(@"game.sat", 50)];
-    [self setStatusBarHidden:DefBool(@"game.hidebar", NO)];
+    if (DefBool(@"game.blitz", NO)) [self setBlitzEnabled:YES];
+    if (DefBool(@"game.coins", NO)) [self setCoinsHidden:YES];
+    if (DefBool(@"game.fps", NO)) [self setFPSEnabled:YES];
+    if ([Defs() objectForKey:@"game.res"]) [self applyResolution:DefInt(@"game.res", 2)];
+    if (fabs(DefFloat(@"game.sat", 50) - 50.0) > 0.5) [self applySaturation:DefFloat(@"game.sat", 50)];
+    if (DefBool(@"game.hidebar", NO)) [self setStatusBarHidden:YES];
 }
 
 @end
@@ -1742,9 +1751,11 @@ static UIButton *MkCircle(UIView *p, NSString *t, CGRect f, id target, SEL sel) 
 
 static ChronoView *gChrono = nil;
 
+static BOOL gSafeMode = NO;
+
 static void ShowBanner(UIWindow *w) {
     UILabel *l = [[UILabel alloc] init];
-    l.text = @"dylib by Ragnar";
+    l.text = gSafeMode ? @"dylib by Ragnar · mode sûr" : @"dylib by Ragnar";
     l.font = [UIFont boldSystemFontOfSize:15];
     l.textColor = UIColor.whiteColor;
     l.textAlignment = NSTextAlignmentCenter;
@@ -1784,9 +1795,11 @@ static void ShowChrono(void) {
     [w addSubview:gChrono];
     [gChrono applyConfig];
     ShowBanner(w);
-    [[GameTools shared] reapplyAll];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ [[GameTools shared] reapplyAll]; });
+    if (!gSafeMode) {
+        // Les réglages du jeu (Blitz, pièces, FPS...) ne sont réappliqués que bien après le démarrage.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ [[GameTools shared] reapplyAll]; });
+    }
 }
 
 __attribute__((constructor))
@@ -1796,7 +1809,25 @@ static void chrono_init(void) {
                     object:nil
                      queue:NSOperationQueue.mainQueue
                 usingBlock:^(NSNotification *n) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            // Protection : si le lancement précédent a planté avant 12 s, on démarre en mode sûr
+            // (tous les réglages du jeu sont coupés).
+            gSafeMode = [Defs() boolForKey:@"boot.pending"];
+            if (gSafeMode) {
+                for (NSString *k in @[@"game.blitz", @"game.coins", @"game.fps", @"game.res", @"game.sat", @"game.hidebar"]) {
+                    [Defs() removeObjectForKey:k];
+                }
+            }
+            [Defs() setBool:YES forKey:@"boot.pending"];
+            [Defs() synchronize];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                [Defs() setBool:NO forKey:@"boot.pending"];
+                [Defs() synchronize];
+            });
+        });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{ ShowChrono(); });
     }];
 }
