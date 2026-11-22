@@ -1,4 +1,4 @@
-// Chrono v7.1 - dylib by Ragnar
+// Chrono v7.2 - dylib by Ragnar
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
@@ -85,7 +85,7 @@ static UIColor *AccentColor(NSInteger i) {
         case 3: return COL(155,89,182);
         case 4: return COL(241,196,15);
         case 5: return COL(255,255,255);
-        default: return COL(46,204,113);
+        default: return COL(0,204,54);
     }
 }
 
@@ -113,6 +113,14 @@ static NSAttributedString *CellText(int n, NSString *unit, UIColor *col, CGFloat
     return a;
 }
 
+static UIColor *MixColor(UIColor *c, CGFloat t, CGFloat target) {
+    CGFloat r = 0, g = 0, b = 0, a = 0;
+    [c getRed:&r green:&g blue:&b alpha:&a];
+    return [UIColor colorWithRed:r + (target - r) * t green:g + (target - g) * t blue:b + (target - b) * t alpha:1.0];
+}
+static UIColor *GradTop(UIColor *c) { return MixColor(c, 0.28, 1.0); }
+static UIColor *GradBottom(UIColor *c) { return MixColor(c, 0.38, 0.0); }
+
 // Style LiveSplit : gros chiffre à droite, centièmes plus petits (ex : 0 .00)
 static NSAttributedString *LiveSplitText(NSTimeInterval t, UIColor *col, CGFloat h) {
     if (t < 0) t = 0;
@@ -124,11 +132,11 @@ static NSAttributedString *LiveSplitText(NSTimeInterval t, UIColor *col, CGFloat
     else mainS = [NSString stringWithFormat:@"%d:%02d:%02d", total / 3600, (total % 3600) / 60, total % 60];
     NSMutableAttributedString *a = [[NSMutableAttributedString alloc]
         initWithString:mainS
-            attributes:@{NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:h * 0.82 weight:UIFontWeightBold],
+            attributes:@{NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:h * 0.86 weight:UIFontWeightBold],
                          NSForegroundColorAttributeName: col}];
     [a appendAttributedString:[[NSAttributedString alloc]
         initWithString:[NSString stringWithFormat:@".%02d", cs]
-            attributes:@{NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:h * 0.46 weight:UIFontWeightSemibold],
+            attributes:@{NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:h * 0.51 weight:UIFontWeightBold],
                          NSForegroundColorAttributeName: col}]];
     return a;
 }
@@ -456,6 +464,8 @@ static BOOL ContainsCI(const uint16_t *s, int len, const char *needle) {
 @property (nonatomic, strong) NSArray<UIView *> *cells;
 @property (nonatomic, strong) NSArray<UILabel *> *cellLabels;
 @property (nonatomic, strong) UILabel *mainLabel;
+@property (nonatomic, strong) CAGradientLayer *gradLayer;
+@property (nonatomic, strong) CALayer *maskLayer;
 @property (nonatomic) NSInteger style;
 @property (nonatomic) NSInteger accent;
 @property (nonatomic) NSInteger bgIdx;
@@ -942,6 +952,14 @@ static void ScaleTree(UIView *v, CGFloat f) {
         _mainLabel.minimumScaleFactor = 0.3;
         [_box addSubview:_mainLabel];
 
+        // Style LiveSplit : texte rempli avec un dégradé vertical
+        _gradLayer = [CAGradientLayer layer];
+        _gradLayer.startPoint = CGPointMake(0.5, 0);
+        _gradLayer.endPoint = CGPointMake(0.5, 1);
+        _maskLayer = [CALayer layer];
+        _gradLayer.mask = _maskLayer;
+        [_box.layer addSublayer:_gradLayer];
+
         // Gestes : 1 appui = lancer / pause / reset, appui long = réglages
         UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(boxTapped)];
         [_box addGestureRecognizer:tap];
@@ -995,7 +1013,14 @@ static void ScaleTree(UIView *v, CGFloat f) {
         c.frame = CGRectMake(i * (cw + 8.0), 0, cw, H);
         self.cellLabels[i].frame = c.bounds;
     }
-    self.mainLabel.hidden = cellsStyle;
+    BOOL lsStyle = (self.style == 1);
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    self.gradLayer.hidden = !lsStyle;
+    self.gradLayer.frame = self.box.bounds;
+    self.maskLayer.frame = self.gradLayer.bounds;
+    [CATransaction commit];
+    self.mainLabel.hidden = (cellsStyle || lsStyle);
     self.mainLabel.frame = CGRectMake(8, 0, W - 16, H);
     self.mainLabel.textAlignment = (self.style == 1) ? NSTextAlignmentRight : NSTextAlignmentCenter;
     self.box.alpha = self.opacityVal;
@@ -1023,7 +1048,7 @@ static void ScaleTree(UIView *v, CGFloat f) {
             break;
         case 1:
             self.box.backgroundColor = show ? bg : UIColor.clearColor;
-            self.box.layer.cornerRadius = 4;
+            self.box.layer.cornerRadius = 0;
             break;
         case 2:
             self.box.backgroundColor = show ? ((self.bgIdx == 0) ? COL(28,28,30) : bg) : UIColor.clearColor;
@@ -1081,8 +1106,9 @@ static void ScaleTree(UIView *v, CGFloat f) {
 - (void)refresh {
     NSTimeInterval t = [self elapsed];
     BOOL idle = (!self.running && self.accumulated == 0);
-    UIColor *idleCol = (self.style == 1) ? COL(165,165,165) : UIColor.whiteColor;
-    UIColor *col = self.running ? AccentColor(self.accent) : (idle ? idleCol : COL(243,156,18));
+    UIColor *idleCol = (self.style == 1) ? COL(172,172,172) : UIColor.whiteColor;
+    UIColor *pauseCol = (self.style == 1) ? COL(122,122,122) : COL(243,156,18);
+    UIColor *col = self.running ? AccentColor(self.accent) : (idle ? idleCol : pauseCol);
     if (self.style == 0) {
         int total = (int)t;
         NSArray *vals = @[@(total / 3600), @((total % 3600) / 60), @(total % 60)];
@@ -1091,12 +1117,38 @@ static void ScaleTree(UIView *v, CGFloat f) {
             self.cellLabels[i].attributedText = CellText([vals[i] intValue], units[i], col, self.timerH);
         }
     } else if (self.style == 1) {
-        self.mainLabel.attributedText = LiveSplitText(t, col, self.timerH);
+        [self renderLiveSplit:t color:col];
     } else if (self.style == 2) {
         self.mainLabel.attributedText = IOSTimerText(t, col, self.timerH);
     } else {
         self.mainLabel.attributedText = TextOnlyText(t, col, self.timerH);
     }
+}
+
+- (void)renderLiveSplit:(NSTimeInterval)t color:(UIColor *)col {
+    CGSize size = self.box.bounds.size;
+    if (size.width < 10 || size.height < 10) return;
+    CGFloat scale = [UIScreen mainScreen].scale * self.zoomVal;
+    CGFloat maxW = size.width - 24.0;
+    NSAttributedString *a = LiveSplitText(t, UIColor.whiteColor, self.timerH);
+    CGSize ts = [a boundingRectWithSize:CGSizeMake(10000, 10000) options:NSStringDrawingUsesLineFragmentOrigin context:nil].size;
+    if (ts.width > maxW && ts.width > 1) {
+        a = LiveSplitText(t, UIColor.whiteColor, self.timerH * maxW / ts.width);
+        ts = [a boundingRectWithSize:CGSizeMake(10000, 10000) options:NSStringDrawingUsesLineFragmentOrigin context:nil].size;
+    }
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat preferredFormat];
+    fmt.scale = scale;
+    fmt.opaque = NO;
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:size format:fmt];
+    UIImage *img = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        [a drawAtPoint:CGPointMake(size.width - 12.0 - ts.width, (size.height - ts.height) / 2.0)];
+    }];
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    self.maskLayer.contentsScale = scale;
+    self.maskLayer.contents = (id)img.CGImage;
+    self.gradLayer.colors = @[(id)GradTop(col).CGColor, (id)GradBottom(col).CGColor];
+    [CATransaction commit];
 }
 
 - (void)tick { [self refresh]; }
